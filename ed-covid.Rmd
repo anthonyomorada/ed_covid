@@ -1,0 +1,290 @@
+---
+title: "ed-covid"
+author: "Anthony Morada"
+date: "2/26/2021"
+output:
+  html_document: default
+  word_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+#Loading data
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(reshape2)
+
+
+#For TableOne
+kableone <- function(x, ...) {
+  capture.output(x <- print(x))
+  knitr::kable(x, ...)
+}
+
+#loading data
+df <- read.csv("~/THE GUTHRIE CLINIC/Foundation Research Projects - COVID Trauma/Data4.csv") %>% 
+  clean_names() %>%
+  select(-x, -x_1) %>%
+  mutate(dos_tm = paste(dos, time_of_arrival)) %>%
+  mutate(dos_tm = as.POSIXct(dos_tm,
+                             format = "%m/%d/%Y %H:%M",
+                             tz = "America/New_York")) %>%
+  select(-dos, -time_of_arrival) %>%
+  mutate(trauma_number = as.integer(trauma_number)) %>%
+  mutate(alert_level = case_when(
+    str_detect(alert_level, "Protocol T") ~ "Protocol T",
+    str_detect(alert_level, "Trauma Evaluation") ~ "Trauma Evaluation",
+    str_detect(alert_level, "Trauma Alert") ~ "Trauma Alert",
+    )) %>%
+  mutate(alert_level = as.factor(alert_level)) %>%
+  mutate(post_ed_destination = case_when(
+    str_detect(post_ed_destination, "ICU/Critical Care Unit") ~ "ICU/Critical Care Unit",
+    str_detect(post_ed_destination, "OR (Including Pre-Op Area)") ~ "OR (Including Pre-Op Area)",
+    str_detect(post_ed_destination, "Step Down Unit/Intermediate") ~ "Step Down Unit/Intermediate",
+    str_detect(post_ed_destination, "Med/Surg Unit") ~ "Med/Surg Unit",
+    str_detect(post_ed_destination, "Transfer to Other Hospital/Trauma Center") ~ "Transfer to Other Hospital/Trauma Center",
+    str_detect(post_ed_destination, "Home") ~ "Home",
+    str_detect(post_ed_destination, "Psychiatric Unit (in-house)") ~ "Psychiatric Unit (in-house)",
+    str_detect(post_ed_destination, "Other") ~ "Other",
+    str_detect(post_ed_destination, "Morgue (Coroner, Death, DOA)") ~ "Morgue (Coroner, Death, DOA)",
+    str_detect(post_ed_destination, "Interventional Angiography") ~ "Interventional Angiography",
+    str_detect(post_ed_destination, "Labor & Delivery") ~ "Labor & Delivery"
+    )) %>%
+  mutate(post_ed_destination = as.factor(post_ed_destination)) %>%
+  mutate(age = as.numeric(age)) %>%
+  mutate(gender = as.factor(gender)) %>%
+  mutate(it = case_when(
+    str_detect(it, "Blunt") ~ "Blunt",
+    str_detect(it, "Penetrating") ~ "Penetrating"
+  )) %>%
+  mutate(it = as.factor(it)) %>%
+  mutate(iss = as.numeric(iss)) %>%
+  mutate(live_die = case_when(
+    str_detect(live_die, "Alive") ~ "Alive",
+    str_detect(live_die, "Dead") ~ "Dead"
+  )) %>%
+  mutate(live_die = as.factor(live_die)) %>%
+  mutate(los = as.numeric(los)) %>%
+  mutate(icu_los = as.numeric(icu_los)) %>%
+  mutate(covid_test = case_when(
+    str_detect(covid_test, "Not Tested") ~ "Not Tested",
+    str_detect(covid_test, "NO = Negative COVID19") ~ "NO = Negative COVID19",
+    str_detect(covid_test, "YES = Positive COVID19") ~ "YES = Positive COVID19"
+  )) %>%
+  mutate(covid_test = as.factor(covid_test)) %>%
+  mutate(mechanism = as.factor(mechanism)) %>%
+  select(-assault) %>%
+  mutate(icu_los = replace_na(icu_los, 0)) 
+
+
+#loading alc levels, skipping all other columns
+alc <- read_excel("~/THE GUTHRIE CLINIC/Foundation Research Projects - COVID Trauma/Data with alcohol.xlsx", 
+    sheet = "Sheet1", col_types = c("numeric", 
+        "skip", "skip", "skip", "skip", 
+        "skip", "skip", "skip", "skip", "skip", 
+        "skip", "skip", "skip", "skip", "skip", 
+        "skip", "text", "skip")) %>%
+  clean_names() %>%
+  mutate(etoh = gsub("^-", "", etoh, perl = TRUE)) %>%
+  mutate(etoh = as.numeric(etoh))
+  
+#merging by "trauma_number"
+df <- merge(df, alc, by.x = "trauma_number", 
+             by.y = "trauma_number", all.x = TRUE, all.y = FALSE)
+
+
+#adding era
+df <- df %>%
+  filter( #filtering for march 16 to nov 15 in 2019 and 2020
+    (dos_tm >= as.POSIXct("2019-03-16 00:00:00") & dos_tm <= as.POSIXct("2019-11-15 00:00:00")) | 
+      (dos_tm >= as.POSIXct("2020-03-16 00:00:00") & dos_tm <= as.POSIXct("2020-11-15 00:00:00"))
+    ) %>%
+  mutate(era = as.factor(format(dos_tm, format="%Y")))  # adding era 
+
+
+df2 <- df
+
+#changing mechanism into columns
+df$mechanism <- droplevels(df$mechanism)
+df$mechanism <- tolower(df$mechanism)
+df$mechanism <- gsub("[[:punct:]]", "_", df$mechanism)
+df$mechanism <- gsub(" ", "_", df$mechanism)
+df$mechanism <- as.factor(df$mechanism)
+
+res <- data.frame(
+           do.call(rbind,lapply(df$mechanism, function(x) table(factor(x, levels=unique(unlist(df$mechanism)))))), 
+           stringsAsFactors=FALSE)
+res <- data.frame(lapply(res, as.factor))
+df<- cbind(df, res)
+rm(alc, res)
+```
+
+
+```{r preparing data}
+#Columns we are interested in
+ind_vars <- colnames(df)
+ind_vars <- ind_vars[!ind_vars %in% c("era", "mechanism", "discharge_date", "trauma_number", "mrn", "alert_level", "post_ed_destination", "covid_test", "dos_tm")]
+dep_vars <- c("era")
+
+
+# Selecting columns of interest
+df <- select(df, all_of(ind_vars) | all_of(dep_vars)) # selecting for variables of interest
+
+
+#FINDING PARAMETRIC OR NONPARAMETRIC VARIABLES
+#creating cont_vars
+cont_vars <- colnames(df[,sapply(df, function(x) is.numeric(x))])
+#creating non normal variables by Shapiro test < 0.05 = non normal
+nonnorm_vars <- c()
+for(i in 1:length(cont_vars)){
+  if(shapiro.test(df[,cont_vars[i]])$p.value <= 0.05){
+    nonnorm_vars[i] <- cont_vars[i]
+  }
+}
+nonnorm_vars <- nonnorm_vars[!is.na(nonnorm_vars)]
+
+#FINDING CATEGORICAL VARIABLES
+cat_vars <-  colnames(df[,sapply(df, function(x) is.factor(x))])
+exact_vars <- NULL
+for(i in 1:length(cat_vars)){
+  if (sum(chisq.test(table(df[,cat_vars[i]], df$era))$expected < 5)){
+    exact_vars[i] <- cat_vars[i]
+  }
+}
+exact_vars <- exact_vars[!is.na(exact_vars)]
+
+```
+
+
+```{r}
+library(tableone)
+
+#description of all 
+kableone(print(
+  CreateTableOne(data = df, factorVars = cat_vars), 
+  nonnormal = nonnorm_vars, 
+  showAllLevels = TRUE, 
+  formatOptions = list(big.mark = ","), 
+  quote = FALSE, 
+  noSpaces = TRUE,
+  missing = TRUE
+  ))
+
+#by era
+kableone(print(
+  CreateTableOne(data = df, factorVars = cat_vars, strata = "era", argsExact = list(workspace = 2 * 10^5, simulate.p.value = TRUE)),
+  nonnormal = nonnorm_vars, 
+  exact = exact_vars, 
+  showAllLevels = TRUE, 
+  formatOptions = list(big.mark = ","), 
+  quote = FALSE, 
+  noSpaces = TRUE,
+  missing = TRUE
+  ))
+
+
+#multivariate
+
+#allvariables
+library(finalfit)
+df <- select(df, -etoh)
+df <- na.omit(df)
+df <- df[, sapply(df, function(col) length(unique(col))) > 1]
+ind_vars <- colnames(df)
+ind_vars <- ind_vars[!ind_vars %in% c("era", "mechanism", "discharge_date", "trauma_number", "mrn", "alert_level", "post_ed_destination", "covid_test", "dos_tm")]
+form <- as.formula(paste(dep_vars ,"~", paste0(ind_vars, collapse = " + ")))
+mod <- glm(formula = form, data = df, family = binomial)
+
+cat('\n\n<!-- -->\n\n')
+  print(kableone(print(cbind(exp(cbind(OR = coef(mod), confint.default(mod))), P=summary(mod)$coefficients[,4]))))
+cat('\n\n<!-- -->\n\n')
+
+#stepwise
+mod <- glm(formula = form, data = df, family = binomial) %>%
+    MASS::stepAIC(trace = TRUE, direction = "both")
+
+cat('\n\n<!-- -->\n\n')
+  print(kableone(print(cbind(exp(cbind(OR = coef(mod), confint.default(mod))), P=summary(mod)$coefficients[,4]))))
+cat('\n\n<!-- -->\n\n')
+```
+
+
+
+```{r multivariate confirmation}
+mlr <- glm(era ~ ., data = df, family = binomial)
+print(kableone(print(cbind(exp(cbind(OR = coef(mlr), confint.default(mlr))), P=summary(mlr)$coefficients[,4]))))
+
+```
+
+
+
+```{r}
+
+df2<- df2 %>%
+  mutate(mech2 = case_when(
+    str_detect(mechanism, "Assault") ~ "Assault",
+    str_detect(mechanism, "ATV") ~ "ATV",
+    str_detect(mechanism, "Fall") ~ "Fall",
+    str_detect(mechanism, "Gunshot") ~ "Gunshot",
+    str_detect(mechanism, "Motorcycle") ~ "Motorcycle",
+    str_detect(mechanism, "Motor Vehicle Accident") ~ "Motor Vehicle Accident",
+    str_detect(mechanism, "Self-Harm") ~ "Self-Harm",
+    TRUE ~ "Other Mechanism"
+  ))
+
+
+
+library(dplyr)
+library(ggplot2)
+
+df2 %>%
+ filter(dos_tm >= "2019-03-17 11:54:00" & dos_tm <= "2020-11-14 21:45:00") %>%
+ ggplot() +
+ aes(x = era, fill = it) +
+ geom_bar() +
+ scale_fill_hue() +
+ theme_minimal()
+
+
+library(dplyr)
+library(ggplot2)
+
+df2 %>%
+ filter(dos_tm >= "2019-03-17 11:54:00" & dos_tm <= "2020-11-14 21:45:00") %>%
+ ggplot() +
+ aes(x = era, fill = mechanism) +
+ geom_bar() +
+ scale_fill_hue() +
+ theme_minimal()
+
+
+
+library(dplyr)
+library(ggplot2)
+
+df2 %>%
+ filter(dos_tm >= "2019-03-17 11:54:00" & dos_tm <= "2020-11-14 21:45:00") %>%
+ ggplot() +
+ aes(x = era, fill = mech2) +
+ geom_bar() +
+ scale_fill_hue() +
+ theme_minimal()
+
+
+
+
+library(dplyr)
+library(ggplot2)
+
+df2 %>%
+ filter(dos_tm >= "2019-03-17 11:54:00" & dos_tm <= "2020-11-14 21:45:00") %>%
+ ggplot() +
+ aes(x = era, y = los) +
+ geom_boxplot(fill = "#0c4c8a") +
+ theme_minimal()
+
+  
+
+```
